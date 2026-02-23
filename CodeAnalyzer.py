@@ -1,7 +1,7 @@
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Any
 
 import clang.cindex
 from clang.cindex import Cursor, CursorKind, StorageClass, TypeKind
@@ -29,8 +29,8 @@ class Parameter:
 
     # 参数名称
     name: str
-    position: int      # 参数在函数参数列表中的位置, 从0开始计算
-    type_name: str     # 参数类型名称（如int、char*等）
+    position: int  # 参数在函数参数列表中的位置, 从0开始计算
+    type_name: str  # 参数类型名称（如int、char*等）
 
 
 @dataclass
@@ -39,7 +39,7 @@ class FuncNode:
     函数节点信息类
     存储函数的完整信息，包括声明/定义位置、参数、调用关系等
     """
-    name: str     # 函数名称
+    name: str  # 函数名称
     parameters: list[Parameter] = field(default_factory=[])  # 函数参数列表
     return_type: str = None
     decl_location: CodeLocation = None  # 函数声明的代码位置
@@ -56,16 +56,14 @@ class GlobalVarNode:
     全局变量节点信息类
     存储全局变量（包括静态全局变量）的完整信息
     """
-
-    # 变量名称
-    name: str            # 变量完整类型名称（如int、char[]、int*等）
-    type_name: str       # 变量纯类型名称（去除数组/指针修饰，如char[]的纯类型为char）
+    name: str  # 变量完整类型名称（如int、char[]、int*等）
+    type_name: str  # 变量纯类型名称（去除数组/指针修饰，如char[]的纯类型为char）
     pure_type_name: str  # 纯类型名/原始类型名，去除数组、指针等修饰
-    is_array: bool = False       # 是否为数组类型
-    is_pointer: bool = False     # 是否为指针类型
-    is_static: bool = False      # 是否为静态变量（static）
-    decl_location: CodeLocation = None     # 变量声明位置
-    def_location: CodeLocation = None     # 变量定义位置
+    is_array: bool = False  # 是否为数组类型
+    is_pointer: bool = False  # 是否为指针类型
+    is_static: bool = False  # 是否为静态变量（static）
+    decl_location: CodeLocation = None  # 变量声明位置
+    def_location: CodeLocation = None  # 变量定义位置
 
     @classmethod
     def from_cursor(cls, node: Cursor):
@@ -75,6 +73,17 @@ class GlobalVarNode:
         :return: GlobalVarNode实例
         """
         return CodeAnalyzer.process_GlobalVarNode(node)
+
+
+@dataclass
+class LocalVarNode:
+    name: str  # 变量完整类型名称（如int、char[]、int*等）
+    type_name: str  # 变量纯类型名称（去除数组/指针修饰，如char[]的纯类型为char）
+    pure_type_name: str  # 纯类型名/原始类型名，去除数组、指针等修饰
+    is_array: bool = False  # 是否为数组类型
+    is_pointer: bool = False  # 是否为指针类型
+    is_static: bool = False  # 是否为静态变量（static）
+    func_name: str = None  # 所在函数名称
 
 
 # 全局变量字典：键为变量名，值为GlobalVarNode对象
@@ -151,21 +160,22 @@ class CodeAnalyzer:
         """
         # 检查节点所属文件是否为当前解析文件
         if (
-            node.location.file.name
-            and Path(node.location.file.name).resolve() == self.cur_parse_file
+                node.location.file.name
+                and Path(node.location.file.name).resolve() == self.cur_parse_file
         ):
             # 变量声明节点（全局变量/静态变量）
             if node.kind == CursorKind.VAR_DECL:
                 self.process_GlobalVarNode(node)
             # 函数声明节点
             elif node.kind == CursorKind.FUNCTION_DECL:
-                self.process_funcDeclNode(node) # 记录函数声明信息
+                self.process_funcDeclNode(node)  # 记录函数声明信息
                 if not node.is_definition():
                     return
 
                 # 处理函数定义信息
-                subgraph = dict()
-                self.process_funcDefNode(node, subgraph)
+                sub_graph: set[tuple[Any, Any]] = set()  # 一个函数内 所引用东西关联图, 每个元素是一个有向边, 一个有向边为tuple[src, dst]
+                localvar_dict: dict[str, LocalVarNode] = {}  # 局部变量字典, 记录局部变量的基本信息, 用于构建subgraph
+                self.process_funcDefNode(node, sub_graph, localvar_dict)
 
                 # 将子图信息更新到全局图中
                 # TODO
@@ -183,7 +193,7 @@ class CodeAnalyzer:
             # 已经处理过
             return
 
-        if node.storage_class is None: # 判断存储类型（static/extern等）
+        if node.storage_class is None:  # 判断存储类型（static/extern等）
             return
 
         type_name = node.type.spelling
@@ -195,7 +205,7 @@ class CodeAnalyzer:
         var_node = GlobalVarNode(
             name=var_name,
             type_name=type_name,
-            pure_type_name=type_name, # TODO
+            pure_type_name=type_name,  # TODO
             is_array=is_array,
             is_pointer=is_pointer,
             is_static=is_static,
@@ -246,25 +256,26 @@ class CodeAnalyzer:
             name=func_name,
             parameters=parameters,
             return_type=return_type,
-            def_location = decl_location
+            def_location=decl_location
         )
 
         FuncDict[func_name] = new_func
 
-
-    def process_funcDefNode(self, node: Cursor, subgraph:dict):
+    def process_funcDefNode(self, node: Cursor, sub_graph: set[tuple[Any, Any]],
+                            localvar_dict: dict[str, LocalVarNode]):
         """
         处理函数定义节点，深度遍历函数内所有子节点
         :param node: 函数定义对应的游标节点
-        :param subgraph: 子图字典，用于记录函数内的节点关系
+        :param subgraph: 子图，用于记录函数内的节点关系
         """
         # 前序遍历函数节点的所有子节点（包括嵌套节点）
         pre_node = None
         for n in node.walk_preorder():
-            self.process_subNodeInFunc(n, pre_node)
+            self.process_subNodeInFunc(sub_graph, localvar_dict, n, pre_node, )
             pre_node = n
 
-    def process_subNodeInFunc(self, cur_node: Cursor, pre_node: Cursor = None):
+    def process_subNodeInFunc(self, subgraph: set[tuple[Any, Any]], localvar_dict: dict[str, LocalVarNode],
+                              cur_node: Cursor, pre_node: Cursor = None, ):
         """
         处理函数内的子节点，分析函数调用、数组索引、枚举调用等
         函数内部节点的核心处理入口
@@ -284,15 +295,15 @@ class CodeAnalyzer:
         # # 处理变量赋值节点
         # self.process_varAssignNode(cur_node)
 
-        self.process_callLocalVarNode(cur_node)
-        self.process_callGlobalVarNode(cur_node)
-        self.process_localVarDecalNode(cur_node)
-        self.process_varAssignNode(cur_node)
-        self.process_callFuncNode(cur_node)
-        self.process_callEnumNode(cur_node)
-        self.process_arrIdxNode(cur_node, pre_node)
+        self.process_callLocalVarNode(subgraph, cur_node)
+        self.process_callGlobalVarNode(subgraph, cur_node)
+        self.process_localVarDecalNode(subgraph, localvar_dict, cur_node)
+        self.process_varAssignNode(subgraph, cur_node)
+        self.process_callFuncNode(subgraph, cur_node)
+        self.process_callEnumNode(subgraph, cur_node)
+        self.process_arrIdxNode(subgraph, cur_node, pre_node)
 
-    def process_callLocalVarNode(self, node: Cursor):
+    def process_callLocalVarNode(self, subgraph, node: Cursor):
         """
         处理局部变量调用节点
         提取函数内调用的局部变量信息（未实现具体逻辑）
@@ -301,7 +312,7 @@ class CodeAnalyzer:
         # 待实现：解析函数内调用的局部变量
         pass
 
-    def process_callGlobalVarNode(self, node: Cursor):
+    def process_callGlobalVarNode(self, subgraph, node: Cursor):
         """
         处理全局变量调用节点
         提取函数内调用的全局变量信息（未实现具体逻辑）
@@ -310,7 +321,8 @@ class CodeAnalyzer:
         # 待实现：解析函数内调用的全局变量，更新FuncNode的called_var
         pass
 
-    def process_localVarDecalNode(self, node: Cursor):
+    def process_localVarDecalNode(self, subgraph: set[tuple[Any, Any]], localvar_dict: dict[str, LocalVarNode],
+                                  node: Cursor):
         """
         处理局部变量声明节点
         提取函数内定义的局部变量信息（未实现具体逻辑）
@@ -319,7 +331,7 @@ class CodeAnalyzer:
         # 记录局部变量的声明
         pass
 
-    def process_varAssignNode(self, node: Cursor):
+    def process_varAssignNode(self, subgraph, node: Cursor):
         """
         处理变量赋值节点
         解析代码中的变量赋值操作，提取赋值关系（如变量被赋予的值、赋值位置等）
@@ -329,7 +341,7 @@ class CodeAnalyzer:
         # 如果左右两边都是含有变量的表达式, 则将他们关联起来
         pass
 
-    def process_callFuncNode(self, node: Cursor):
+    def process_callFuncNode(self, subgraph, node: Cursor):
         """
         处理函数调用节点
         识别代码中调用的函数，记录调用关系（如当前函数调用了哪些其他函数）
@@ -339,7 +351,7 @@ class CodeAnalyzer:
         # 检查传入的实参, 如果是全局变量, 则应该有关联关系
         pass
 
-    # def process_callVarNode(self, node: Cursor):
+    # def process_callVarNode(self, subgraph, node: Cursor):
     #     """
     #     处理变量调用节点
     #     识别代码中访问的变量（全局/局部），记录变量使用关系
@@ -348,7 +360,7 @@ class CodeAnalyzer:
     #     # 待实现：提取被访问变量的名称，区分全局/局部变量，更新对应FuncNode的called_var列表
     #     pass
 
-    def process_callEnumNode(self, node: Cursor):
+    def process_callEnumNode(self, subgraph, node: Cursor):
         """
         处理枚举值调用节点
         识别代码中使用的枚举常量，提取枚举相关信息
@@ -359,7 +371,7 @@ class CodeAnalyzer:
         # 1.2 记录枚举常量的定义位置和调用位置，补充至CodeLocation对象
         pass
 
-    def process_arrIdxNode(self, cur_node: Cursor, pre_node: Cursor):
+    def process_arrIdxNode(self, subgraph, cur_node: Cursor, pre_node: Cursor):
         """
         处理数组索引访问节点
         解析数组下标访问操作，分析索引的构成（常量/表达式）
