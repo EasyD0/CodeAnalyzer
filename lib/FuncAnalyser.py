@@ -141,7 +141,7 @@ class FuncAnalyzer:
         raise NotImplementedError
 
     def __init__(self, func_node: Cursor):
-        self.func_node = func_node
+        self.func_cursor_node = func_node
         self.subgraph: set[tuple] = set()
         self.is_def_node = is_funcDef(func_node)
         self.func_name = func_node.spelling
@@ -160,7 +160,7 @@ class FuncAnalyzer:
         构建函数形参列表信息, 返回一个列表
         """
 
-        node = self.func_node
+        node = self.func_cursor_node
         parameters: list[Parameter] = []
         for i, p in enumerate(node.get_arguments()):
             p_type = p.type
@@ -188,15 +188,16 @@ class FuncAnalyzer:
         """
         构建返回值节点
         """
-        return ReturnValNode.from_cursor(self.func_node)
+        return ReturnValNode.from_cursor(self.func_cursor_node)
 
     def process_funcDeclNode(self) -> FuncNode | None:
         """
-        处理函数声明节点, 获取基本信息
+        处理函数声明节点, 获取基本信息, 并将self.result绑定到全局FuncDict
         """
-        node = self.func_node
+        node = self.func_cursor_node
         func_name = node.spelling
         if not func_name:
+            logger.error("函数名不存在, 停止分析该函数声明")
             return None
 
         # 已经解析过, 则直接返回
@@ -204,8 +205,8 @@ class FuncAnalyzer:
             self.result = FuncDict[func_name]
             return FuncDict[func_name]
 
+        # 未解析过, 则创建新的FuncNode, 并绑定到全局FuncDict
         return_type_name = node.result_type.get_canonical().spelling
-
         self.result = FuncNode(
             name=func_name,
             parameters=self._getFuncParams(),
@@ -232,31 +233,30 @@ class FuncAnalyzer:
         self.subgraph: set[tuple[Any, Any]] = set()
 
         if not func_name:
-            logger.error("函数名不存在")
+            logger.error("函数名不存在, 停止分析该函数定义")
             return
 
-        if func_name not in FuncDict:
-            self.process_funcDeclNode()
+        self.process_funcDeclNode()
 
-        if FuncDict[func_name].def_location is not None:
+        if self.result.def_location is not None:
             logger.warning(
-                f"函数{func_name}在 {FuncDict[func_name].def_location} 已有定义"
+                f"函数{func_name}在 {self.result.def_location} 已有定义, 停止分析该函数定义"
             )
             return
 
         # 更新形参名称
-        for i, p in enumerate(self.func_node.get_arguments()):
+        for i, p in enumerate(self.func_cursor_node.get_arguments()):
             p_type_name = typeName(p.type.get_canonical())
             if p_type_name == "void":  # 处理形参列表为(void)的情况
                 break
 
             p_name = p.spelling if p.spelling else f"parameter{i}"
 
-            # TODO 需要防止代码中出现声明和定义不一致的情况
-            FuncDict[func_name].parameters[i].name = p_name
+            # TODO 更新形参名称, 以函数定义为准, 类型则保持不变,因为声明定义必须一致
+            self.result.parameters[i].name = p_name
 
         # 更新def_location
-        FuncDict[func_name].def_location = CodeLocation.from_cursor(self.func_node)
+        self.result.def_location = CodeLocation.from_cursor(self.func_cursor_node)
 
         # pre_node = None
         # for cur_node in node.walk_preorder():
@@ -270,7 +270,7 @@ class FuncAnalyzer:
         #     pre_node = cur_node
 
         PreorderAST(
-            self.func_node,
+            self.func_cursor_node,
             lambda node: self.process_subNode(node),
             lambda node: node.get_children(),
         )

@@ -152,10 +152,9 @@ def is_struct(x) -> bool:
             return decl.kind == CursorKind.STRUCT_DECL
         elif x.kind == TypeKind.ELABORATED:
             # 处理如 "struct S" 这种带标签的类型
-            # TODO 这里不是褪去指针, 因为这个分支不是TypeKind.POINTER
-            pointee = x.get_pointee()
-            if pointee:
-                return is_struct(pointee)
+            canonical = x.get_canonical()
+            if canonical:
+                return is_struct(canonical)
         return False
 
     elif isinstance(x, Cursor):
@@ -236,12 +235,20 @@ def is_funcDef(node: Cursor) -> bool:
     return node.kind == CursorKind.FUNCTION_DECL and node.is_definition()
 
 
-
-
 def is_callVarNode(node: Cursor) -> bool:
-    raise NotImplementedError  # TODO 这个还要更进一步检查
-    return node.kind == CursorKind.DECL_REF_EXPR
+    """
+    判断一个节点是否是为变量的引用
+    """
+    if node.kind != CursorKind.DECL_REF_EXPR:
+        return False
 
+    ref_decl = node.referenced
+    if ref_decl is None:
+        return False
+    if ref_decl.kind in (CursorKind.VAR_DECL, CursorKind.PARM_DECL):
+        return True
+    else:
+        return False
 
 # %% AI generate, not Review
 def is_callLocalVarNode(node: Cursor) -> bool:
@@ -258,16 +265,11 @@ def is_callLocalVarNode(node: Cursor) -> bool:
 
     # 获取引用的声明
     referenced_decl = node.referenced
-    if referenced_decl is None:
-        return False
 
-    # 判断声明的种类是否为局部变量
-    # 局部变量通常是 VarDecl，且在其父作用域中是函数体内的
-    if referenced_decl.kind == CursorKind.VAR_DECL:
-        # 检查其父节点是否为函数体（即不是文件作用域的全局变量）
-        parent = referenced_decl.semantic_parent
-        if parent is not None and parent.kind == CursorKind.FUNCTION_DECL:
-            return True
+    # 检查其父节点是否为函数体（即不是文件作用域的全局变量）
+    parent = referenced_decl.semantic_parent
+    if parent is not None and parent.kind == CursorKind.FUNCTION_DECL:
+        return True
 
     return False
 
@@ -284,29 +286,33 @@ def is_callGlobalVarNode(node: Cursor) -> bool:
     # 必须是变量引用表达式
     if not is_callVarNode(node):
         return False
-
-    referenced_decl = node.referenced
-    if referenced_decl is None:
-        return False
-
-    # 必须是变量声明
-    if referenced_decl.kind != CursorKind.VAR_DECL:
-        return False
-
+    
     # 检查其父作用域：如果是翻译单元（TranslationUnit），说明是全局变量
+    referenced_decl = node.referenced
     parent = referenced_decl.semantic_parent
     if parent is not None and parent.kind == CursorKind.TRANSLATION_UNIT:
         return True
-
     return False
 
 
 def is_callFuncParam(node: Cursor) -> bool:
     """
-    检查是否为 函数形参的调用
+    判断一个 Cursor 是否表示对函数参数的访问。
+
+    条件：
+    - 节点是声明引用表达式 (DECL_REF_EXPR)
+    - 引用的声明是一个参数声明 (PARM_DECL)
     """
-    raise NotImplementedError
-    pass
+    # 必须是变量引用表达式
+    if not is_callVarNode(node):
+        return False
+
+    # 获取引用的声明
+    referenced_decl = node.referenced
+    if referenced_decl.kind == CursorKind.PARM_DECL:
+        return True
+
+    return False
 
 
 def is_localVarDeclNode(node: Cursor) -> bool:
@@ -465,8 +471,67 @@ def is_ifStmt(node: Cursor) -> bool:
     return node.kind == CursorKind.IF_STMT
 
 
-def getVarInExpr(node: Cursor):
+def getVarInExpr(node: Cursor) -> list[Cursor | tuple[Cursor, ...]]:
     """
     从一个表达式中获取所有的变量, 形如 x+y 中提取 x, y
+    如果有层级关系比如 x.a->b 则获取三个变量并构成元组
+
+    :param node: AST 表达式节点
+    :return: 变量列表，扁平变量直接返回，链式成员访问返回元组
     """
-    pass
+    result: list[Cursor | tuple[Cursor, ...]] = []
+
+    def extract_var_chain(n: Cursor) -> Cursor | tuple[Cursor, ...] | None:
+        """
+        递归提取变量链，处理 x.a->b 这种链式访问。
+        返回变量本身或其链式元组。
+        """
+        if n.kind == CursorKind.DECL_REF_EXPR:
+            # 基础变量引用
+            return n
+
+        elif n.kind in (CursorKind.MEMBER_REF, CursorKind.MEMBER_REF_EXPR):
+            # 成员访问：需要递归提取完整的链
+            children = list(n.get_children())
+            if children:
+                # 第一个子节点通常是基础对象或之前的成员
+                base = extract_var_chain(children[0])
+                if base is not None:
+                    if isinstance(base, tuple):
+                        # 之前的链 + 当前成员
+                        return base + (n,)
+                    else:
+                        # 单个变量 + 当前成员
+                        return (base, n)
+            return None
+
+        elif n.kind == CursorKind.ARRAY_SUBSCRIPT_EXPR:
+            # 数组下标访问：arr[idx]，提取 arr
+            children = list(n.get_children())
+            if children:
+                return extract_var_chain(children[0])
+            return None
+
+        elif n.kind == CursorKind.PAREN_EXPR:
+            # 括号表达式，递归处理
+            children = list(n.get_children())
+            if children:
+                return extract_var_chain(children[0])
+            return None
+
+        return None
+
+    def collect_vars(n: Cursor) -> None:
+        """遍历节点，收集所有变量"""
+        # 首先检查当前节点是否是需要提取的变量链起点
+        var = extract_var_chain(n)
+        if var is not None:
+            result.append(var)
+
+        # 递归遍历子节点
+        for child in n.get_children():
+            collect_vars(child)
+
+    # 收集变量
+    collect_vars(node)
+    return result

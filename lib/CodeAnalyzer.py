@@ -1,3 +1,6 @@
+"""
+代码分析器, 其中函数分析的部分将迁移到FuncAnalyzer
+"""
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,7 +55,7 @@ from .AnalyzerHelper import (
     pureTypeName,
 )
 
-logger = logSetup("CodeA")
+logger = logSetup()
 
 
 class CodeAnalyzer:
