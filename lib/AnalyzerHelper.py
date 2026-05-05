@@ -126,6 +126,7 @@ def is_union(x) -> bool:
             decl = x.get_declaration()
             return decl.kind == CursorKind.UNION_DECL
         elif x.kind == TypeKind.ELABORATED:
+            # TODO 这里不太对劲
             pointee = x.get_pointee()
             if pointee:
                 return is_union(pointee)
@@ -151,7 +152,7 @@ def is_struct(x) -> bool:
             decl = x.get_declaration()
             return decl.kind == CursorKind.STRUCT_DECL
         elif x.kind == TypeKind.ELABORATED:
-            # 处理如 "struct S" 这种带标签的类型
+            # TODO 处理如 "struct S" 这种带标签的类型
             canonical = x.get_canonical()
             if canonical:
                 return is_struct(canonical)

@@ -60,6 +60,18 @@ class CodeLocation:
 
         return None
 
+    def __hash__(self):
+        return hash((self.file, self.begin, self.end))
+
+    def __eq__(self, other):
+        if not isinstance(other, CodeLocation):
+            return False
+
+        return all([
+            self.begin == other.begin,
+            self.end == other.end,
+            self.file.resolve() == other.file.resolve(),
+        ])
 
 class TypeCategory(Enum):
     """
@@ -88,9 +100,9 @@ class TypeCategory(Enum):
 
         return TypeCategory.built_in
 
-
+from abc import ABC, abstractmethod
 @dataclass
-class VarNode:
+class VarNode(ABC):
     """
     通用变量节点
     """
@@ -105,33 +117,67 @@ class VarNode:
     member_list: list["VarNode"] | list["FuncBase"] = None
     pass
 
+    @abstractmethod
+    def __hash__(self):
+        return hash((self.name, self.pure_type_name))
+
+    @abstractmethod
+    def __eq__(self, other):
+        if not isinstance(other, VarNode):
+            return False
+
+        return (self.name == other.name
+                and self.type_name == other.type_name
+                and self.is_member == other.is_member
+                and self.member_list == other.member_list
+        )
 
 @dataclass
 class Parameter(VarNode):
     """
-    函数形参节点
+    函数形参节点, 不应视为可hash的
     """
 
     position: int = None  # 参数在函数参数列表中的位置, 从0开始计算
-
+    in_func: str =  None
     # TODO 是否需要related_with_func 即使和函数有关, 也是和函数返回值有关?
     related_with_func: set[str] = field(default_factory=set())
     related_with_var: set[str] = field(default_factory=set())
 
     @classmethod
-    def from_cursor(cls, node: Cursor, position: int = 0):
+    def from_cursor(cls, param_node: Cursor, func_name:str, position: int = 0):
         """
         node: 单个形参声明的子节点
         position: 形参位置
         """
+        res = Parameter(
+            name = nodeName(param_node),
+            type_name = typeName(param_node),
+            pure_type_name = pureTypeName(param_node),
+            var_category = TypeCategory.from_cursor(param_node),
+            is_member = False,
+            position = position,
+            in_func = func_name,
+        )
 
-        pass
+        memberListParseRecursive(res, param_node.type)
+        return res
 
+    def __hash__(self):
+        return hash((self.name, self.pure_type_name, self.position))
+
+    def __eq__(self, other):
+        if not isinstance(other, Parameter):
+            return False
+        return (
+            self.name == other.name,
+
+        )
 
 @dataclass
 class ReturnValNode(VarNode):
     """
-    函数返回值节点
+    函数返回值节点, 不应视为可hash的
     """
 
     name: str | None = None  # 不再是变量名, 而是函数的名字, 或默认为None
@@ -162,12 +208,39 @@ class ReturnValNode(VarNode):
 
         return cur_node
 
+    def __hash__(self):
+        return hash((self.name, self.pure_type_name))
+    def __eq__(self, other):
+        if not isinstance(other, ReturnValNode):
+            return False
+        return all([
+            self.name == other.name,
+            self.type_name == other.type_name,
+            self.pure_type_name == other.pure_type_name,
+            self.member_list == other.member_list,
+        ])
+
 @dataclass
-class FuncBase:
+class FuncBase(ABC):
     # 返回值和形参
     return_type: str = None
     return_var: ReturnValNode = field(default_factory=ReturnValNode)
     parameters: list[Parameter] = field(default_factory=[])
+
+    @abstractmethod
+    def __hash__(self):
+        return hash((self.return_type, self.return_var))
+
+    @abstractmethod
+    def __eq__(self, other):
+        if not isinstance(other, FuncBase):
+            return False
+
+        return all([
+            self.return_type == other.return_type,
+            self.return_var == other.return_var,
+            self.parameters == other.parameters,
+        ])
 
 
 @dataclass
@@ -182,6 +255,20 @@ class FuncPointee(FuncBase, VarNode):
     # 被其他的函数指针修改, 如 *funcp1 = func_arr[2];
     changed_var: set[str] = field(default_factory=set())
 
+    def __hash__(self):
+        return hash((self.name, self.type_name, self.is_member, self.return_type))
+
+    def __eq__(self, other):
+        if not isinstance(other, FuncPointee):
+            return False
+
+        return all([
+            self.name == other.name,
+            self.type_name == other.type_name,
+            self.is_member == other.is_member,
+            self.return_type == other.return_type,
+            self.member_list == other.member_list,
+        ])
 
 @dataclass
 class FuncNode(FuncBase):
@@ -213,6 +300,17 @@ class FuncNode(FuncBase):
         """
         raise NotImplementedError
 
+    def __hash__(self):
+        return hash((self.name, self.def_location))
+
+    def __eq__(self, other):
+        if not isinstance(other, FuncNode):
+            return False
+
+        return all([
+            self.name == other.name,
+            self.def_location == other.def_location,
+        ])
 
 # @dataclass
 # class FuncPointerNode:
@@ -250,6 +348,11 @@ class GlobalVarNode(VarNode):
         """
         return CodeAnalyzer.process_globalVarNode(node)
 
+    def __hash__(self):
+        raise NotImplementedError
+
+    def __eq__(self, other):
+        raise NotImplementedError
 
 @dataclass
 class LocalVarNode(VarNode):
@@ -263,6 +366,14 @@ class LocalVarNode(VarNode):
     @classmethod
     def from_cursor(cls, node: Cursor):
         pass
+
+    def __hash__(self):
+        return hash((self.in_func, self.name))
+
+    def __eq__(self, other):
+        return (self.in_func == other.in_func
+                and self.name == other.name
+                and self.member_list == other.member_list)
 
 
 def memberListParseRecursive(
